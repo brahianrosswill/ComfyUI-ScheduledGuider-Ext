@@ -14,145 +14,104 @@ def find_clothest_index(sigma, sigma_triggers):
     return index
 
 
-class Guider_SheduledCFG(comfy.samplers.CFGGuider):
-    def set_cfg(self, model, cfg_max, cfg_min, sigmas, neg_scale=0):
-        self.model = model
+class Guider_SheduledCFG: # Removed inheritance from comfy.samplers.CFGGuider
+    def __init__(self, model, cfg_max, cfg_min, sigmas, neg_scale=0, use_negative_as_unconditional=True):
+        self.inner_model = model
         self.cfg_max = cfg_max
         self.cfg_min = cfg_min
-        self.sigmas = sigmas
+        self.sigmas = sigmas # This should be the sigmas from the sampler/scheduler
         self.neg_scale = neg_scale
-        self.sigma_max = int(max(sigmas))
-        self.sigma_min = int(min(sigmas))
-        self.model_sig_max = self.model.model.model_sampling.sigma_max
-        self.model_sig_min = self.model.model.model_sampling.sigma_min
-        self.model_sigma_triggers = numpy.zeros(len(sigmas))
-        self.use_negative_as_unconditional = True
-        delta_percent = 1 / len(sigmas)
-        for i in range(len(sigmas)):
-            percent = i * delta_percent
-            self.model_sigma_triggers[i] = \
-                self.model.model.model_sampling.percent_to_sigma(percent)
+        self.use_negative_as_unconditional = use_negative_as_unconditional
+
+        if sigmas is not None and len(sigmas) > 0:
+            self.sigma_max = float(max(sigmas))
+            self.sigma_min = float(min(sigmas))
+            # model_sigma_triggers was calculated here but is unused.
+            # The CFG scheduling correctly uses self.sigmas (KSampler's sigmas).
+            # Removing model_sigma_triggers to simplify and avoid confusion.
+        else:
+            # Handle cases where sigmas might be None or empty
+            self.sigma_max = 0.0
+            self.sigma_min = 0.0
+            print("Warning: Sigmas not provided or empty during Guider_SheduledCFG initialization.")
+            # self.model_sigma_triggers would have been an empty numpy array here.
 
     def set_use_negative(self, use_neg: bool):
         self.use_negative_as_unconditional = use_neg
 
-    def set_conds(self, positive, unconditional, negative=None):
-        conds = {"positive": positive, "uncond": unconditional}
-        if negative is not None:
-            conds["negative"] = negative
-        self.inner_set_conds(conds)
+    # set_conds, get_conditions, calc_predictions, calc_cfg are removed / integrated.
 
-    def get_conditions(self):
-        uncond = self.conds.get("uncond", None)
-        positive_cond = self.conds.get("positive", None)
-        negative_cond = self.conds.get("negative", None)
+    def predict_noise(self, x, sigma, cond, uncond, cond_scale, model_options={}, negative_cond=None):
+        current_sigma_val = sigma.item() if hasattr(sigma, 'item') else sigma
 
-        return (uncond, positive_cond, negative_cond)
+        # Use self.sigmas (from KSampler) to find the current position in the schedule
+        closest_index_in_ksampler_sigmas = find_clothest_index(current_sigma_val, self.sigmas)
+        sigma_for_cfg_calc = self.sigmas[closest_index_in_ksampler_sigmas]
 
-    def calc_predictions(self, x, timestep, model_options, conditions):
-        uncond, positive_cond, negative_cond = conditions
-
-        if negative_cond is not None:
-            conditions = [uncond, positive_cond, negative_cond]
+        if self.sigma_max > self.sigma_min:
+            current_percent = (sigma_for_cfg_calc - self.sigma_min) / (self.sigma_max - self.sigma_min)
         else:
-            conditions = [uncond, positive_cond]
+            current_percent = 1.0
+        
+        # Ensure current_percent is clamped between 0 and 1 before interpolation
+        current_percent = max(0.0, min(1.0, current_percent))
+        current_cfg = self.cfg_min + (self.cfg_max - self.cfg_min) * current_percent
+        
+        # Get predictions from the wrapped model.
+        # cond_scale=1.0 because we are handling scaling externally.
+        uncond_pred = self.inner_model.predict_noise(x, sigma, uncond, cond_scale=1.0, model_options=model_options)
+        cond_pred = self.inner_model.predict_noise(x, sigma, cond, cond_scale=1.0, model_options=model_options)
 
-        out = comfy.samplers.calc_cond_batch(
-            self.inner_model,
-            conditions,
-            x,
-            timestep,
-            model_options
-        )
-        if len(out) == 3:
-            return {
-                "unconditional": out[0],
-                "positive": out[1],
-                "negative": out[2]
-            }
-        else:
-            return {
-                "unconditional": out[0],
-                "positive": out[1],
-                "negative": None
-            }
-
-    def calc_cfg(
-        self, predictions, cfg, x, timestep, model_options, conditions
-    ):
-        uncond, positive_cond, negative_cond = conditions
-
-        if predictions["negative"] is not None:
+        if negative_cond is not None and self.neg_scale > 0:
+            neg_pred = self.inner_model.predict_noise(x, sigma, negative_cond, cond_scale=1.0, model_options=model_options)
+            
             cfg_result = perp_neg(
-                x,
-                predictions["positive"],
-                predictions["negative"],
-                predictions["unconditional"],
-                self.neg_scale,
-                cfg
+                x,            # Not used by perp_neg, but part of its signature
+                cond_pred,    # Positive prediction
+                neg_pred,     # Negative prediction
+                uncond_pred,  # Unconditional prediction
+                self.neg_scale, # Guidance scale for negative prompt
+                current_cfg   # Master guidance scale (scheduled CFG)
             )
 
             for fn in model_options.get("sampler_post_cfg_function", []):
+                args = {
+                    "denoised": cfg_result,
+                    "cond": cond,
+                    "uncond": negative_cond if self.use_negative_as_unconditional else uncond,
+                    "model": self.inner_model, # The original wrapped model
+                    "uncond_denoised": neg_pred if self.use_negative_as_unconditional else uncond_pred,
+                    "cond_denoised": cond_pred,
+                    "sigma": sigma,
+                    "model_options": model_options,
+                    "input": x,
+                }
+                # Add empty_cond and empty_cond_denoised if use_negative_as_unconditional is true,
+                # mimicking the structure from the original calc_cfg.
                 if self.use_negative_as_unconditional:
-                    args = {
-                        "denoised": cfg_result,
-                        "cond": positive_cond,
-                        "uncond": negative_cond,
-                        "model": self.inner_model,
-                        "uncond_denoised": predictions["negative"],
-                        "cond_denoised": predictions["positive"],
-                        "sigma": timestep,
-                        "model_options": model_options,
-                        "input": x,
-                        "empty_cond": uncond,
-                        "empty_cond_denoised": predictions["unconditional"],
-                    }
-                else:
-                    args = {
-                        "denoised": cfg_result,
-                        "cond": positive_cond,
-                        "uncond": uncond,
-                        "model": self.inner_model,
-                        "uncond_denoised": predictions["unconditional"],
-                        "cond_denoised": predictions["positive"],
-                        "sigma": timestep,
-                        "model_options": model_options,
-                        "input": x,
-                    }
+                    args["empty_cond"] = uncond # The true unconditional
+                    args["empty_cond_denoised"] = uncond_pred # Denoised for true unconditional
+                
                 cfg_result = fn(args)
-
             return cfg_result
         else:
-            return comfy.samplers.cfg_function(
-                self.inner_model,
-                predictions["positive"],
-                predictions["unconditional"],
-                cfg,
-                x,
-                timestep,
-                model_options=model_options,
-                cond=positive_cond,
-                uncond=uncond
-            )
+            # Standard CFG: uncond_pred + cfg_scale * (cond_pred - uncond_pred)
+            cfg_result = uncond_pred + current_cfg * (cond_pred - uncond_pred)
 
-    def predict_noise(self, x, timestep, model_options={}, seed=None):
-        conditions = self.get_conditions()
-        predictions = self.calc_predictions(
-            x, timestep, model_options, conditions
-        )
-
-        current_index = find_clothest_index(
-            timestep, self.model_sigma_triggers
-        )
-        current_sigma = self.sigmas[current_index]
-        current_percent = ((current_sigma - self.sigma_min) /
-                           (self.sigma_max - self.sigma_min))
-        current_cfg = ((self.cfg_max - self.cfg_min) * current_percent
-                       + self.cfg_min)
-
-        return self.calc_cfg(
-            predictions, current_cfg, x, timestep, model_options, conditions
-        )
+            for fn in model_options.get("sampler_post_cfg_function", []):
+                args = {
+                    "denoised": cfg_result,
+                    "cond": cond,
+                    "uncond": uncond,
+                    "model": self.inner_model, # The original wrapped model
+                    "uncond_denoised": uncond_pred,
+                    "cond_denoised": cond_pred,
+                    "sigma": sigma,
+                    "model_options": model_options,
+                    "input": x,
+                }
+                cfg_result = fn(args)
+            return cfg_result
 
 
 class SheduledCFGGuider:
@@ -179,7 +138,7 @@ class SheduledCFGGuider:
                 "sigmas": ("SIGMAS", ),
                 }}
 
-    RETURN_TYPES = ("GUIDER",)
+    RETURN_TYPES = ("MODEL",) # CRITICAL FIX: Was "GUIDER"
 
     FUNCTION = "get_guider"
     CATEGORY = "sampling/custom_sampling/guiders"
@@ -187,10 +146,18 @@ class SheduledCFGGuider:
     def get_guider(
             self, model, positive, unconditional, cfg_max, cfg_min, sigmas
     ):
-        guider = Guider_SheduledCFG(model)
-        guider.set_conds(positive, unconditional)
-        guider.set_cfg(model, cfg_max, cfg_min, sigmas)
-        return (guider,)
+        # The SheduledCFGGuider node now returns the wrapper directly.
+        # Conditioning will be handled by the sampler via predict_noise args.
+        # ksampler will take this wrapped_model and use it.
+        # The positive and unconditional inputs to this node are effectively ignored
+        # as the ksampler will provide its own conditioning.
+        # However, to maintain the node signature and avoid breaking existing workflows
+        # that might connect them, we accept them but don't use them here.
+        
+        wrapped_model = Guider_SheduledCFG(model, cfg_max, cfg_min, sigmas)
+        # We return the wrapped_model as a "MODEL" type, because it now duck-types
+        # a model with a predict_noise method.
+        return (wrapped_model,)
 
 
 class PerpNegSheduledCFGGuider:
@@ -235,17 +202,29 @@ class PerpNegSheduledCFGGuider:
     def get_guider(
             self,
             model,
-            positive,
-            negative,
-            unconditional,
+            positive, # Ignored, ksampler provides
+            negative, # Ignored, ksampler provides via negative_cond to predict_noise
+            unconditional, # Ignored, ksampler provides
             cfg_max,
             cfg_min,
             neg_scale,
             sigmas,
             use_negative_as_unconditional
     ):
-        guider = Guider_SheduledCFG(model)
-        guider.set_conds(positive, unconditional, negative)
-        guider.set_cfg(model, cfg_max, cfg_min, sigmas, neg_scale)
-        guider.set_use_negative(use_negative_as_unconditional)
-        return (guider,)
+        # Similar to SheduledCFGGuider, this node now returns the wrapper.
+        # Conditioning is handled by the sampler.
+        wrapped_model = Guider_SheduledCFG(
+            model,
+            cfg_max,
+            cfg_min,
+            sigmas,
+            neg_scale,
+            use_negative_as_unconditional # Passed to __init__
+        )
+        # The set_use_negative method is still useful if one wanted to change it post-init,
+        # but here it's part of construction.
+        # If use_negative_as_unconditional was not part of __init__, then:
+        # wrapped_model.set_use_negative(use_negative_as_unconditional)
+        
+        # Return the wrapped_model as a "MODEL" type.
+        return (wrapped_model,)
