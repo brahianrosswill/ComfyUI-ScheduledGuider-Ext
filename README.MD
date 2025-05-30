@@ -1,51 +1,100 @@
 # Sheduled Guider Extension for ComfyUI
 
-This extension contains various nodes for CFG scheduling.
+This extension contains various nodes for CFG scheduling and other sigma manipulation utilities.
 
-## SheduledCFGGuider Node
+## Guiders Documentation
 
-![Illustration of SheduledCFGGuider Node interface](resources/img/scheduled_cfg.png)
+This section details the advanced CFG Guider nodes provided by this extension.
 
-The `SheduledCFGGuider` node is designed to guide the sampling process using a scheduled CFG (Classifier-Free Guidance) strategy. It adjusts the guidance scale dynamically based on the noise schedule during diffusion.
+### Scheduled CFG Guider
+![Visual representation of Scheduled CFG](resources/img/scheduled_cfg.png)
 
-Thanks to Clybius. I used his [WarmupDecayCFGGuider's source code](https://github.com/Clybius/ComfyUI-Extra-Samplers/blob/52eac1b7c847d2727e0ca93ca26d9ffd77029daa/nodes.py#L675) as a base.
+The `ScheduledCFGGuider` node offers a method to dynamically adjust the Classifier Free Guidance (CFG) scale throughout the sampling process. This dynamic adjustment allows for nuanced control over the image generation, potentially starting with stronger guidance and gradually reducing it, or vice-versa, based on the provided sigma schedule.
 
-### Parameters
+Thanks to Clybius. I used his [WarmupDecayCFGGuider's source code](https://github.com/Clybius/ComfyUI-Extra-Samplers/blob/52eac1b7c847d2727e0ca93ca26d9ffd77029daa/nodes.py#L675) as a base for the original implementation. The details below describe the current version.
 
-- **model**: The generative model to be used.
-- **positive**: A conditioning input that specifies the desired attributes or style.
-- **unconditional**: An unconditional input that serves as the base reference.
-- **cfg_max**: The maximum value for the Classifier-Free Guidance scale (default: 12.0).
-- **cfg_min**: The minimum value for the Classifier-Free Guidance scale (default: 1.0).
-- **sigmas**: A list of sigma values defining the CFG-schedule.
+#### Core Purpose
 
-### Functionality
+The primary function of the `ScheduledCFGGuider` is to modulate the CFG scale applied during image generation. Instead of a fixed CFG value, this node interpolates between a maximum and a minimum CFG scale. This interpolation is guided by the current sigma value within a predefined schedule of sigmas that the sampler will use. This allows for potentially different levels of creative freedom versus prompt adherence at different stages of the diffusion process.
 
-- Dynamically calculates the CFG value based on the current timestep and CFG-schedule.
+#### Input Parameters
 
-### Details
+*   **`model`**: This is the diffusion model that will be guided. The `ScheduledCFGGuider` wraps this model to apply its dynamic CFG logic.
+*   **`positive`**: This input accepts the positive conditioning (e.g., text embeddings representing what you want to see in the image). While this is an input parameter to the node itself, it's important to note that during the sampling process, the KSampler (or a similar sampling node) typically provides the actual positive conditioning that will be used. The `positive` input on the node can act as a placeholder or default if not overridden by the sampler.
+*   **`unconditional`**: This input accepts the unconditional conditioning (e.g., text embeddings representing what you *don't* want to see, or empty embeddings for standard CFG). Similar to the `positive` input, while the `ScheduledCFGGuider` has this parameter, the KSampler usually supplies the unconditional conditioning used during the actual sampling steps.
+*   **`cfg_max`**: This float value defines the maximum CFG scale. This scale is typically applied when the sampling process is at higher sigma values (i.e., earlier in the sampling, when the image is noisier). A higher `cfg_max` encourages stronger adherence to the positive prompt at these initial stages. (Default: 12.0)
+*   **`cfg_min`**: This float value defines the minimum CFG scale. This scale is typically applied when the sampling process is at lower sigma values (i.e., later in the sampling, as the image becomes more defined). A lower `cfg_min` can allow for more creative freedom or finer details to emerge as the generation process concludes. (Default: 1.0)
+*   **`sigmas`**: This input takes the schedule of sigma values that the sampler is configured to use. The `ScheduledCFGGuider` uses this schedule to determine the current CFG scale. It calculates the current sigma's relative position within the provided `sigmas` list (from the highest sigma to the lowest). Based on this relative position, it interpolates the CFG scale for the current step between `cfg_max` (at the start of the sigma schedule) and `cfg_min` (at the end of the sigma schedule). For example, if the current sigma is halfway through the `sigmas` schedule, the applied CFG scale will be halfway between `cfg_max` and `cfg_min`.
 
-Current CFG value is mapped by `sigmas` input and scaled between `cfg_min` and `cfg_max`, based on the position of the current timestep (denoising sigma).
+By adjusting `cfg_max`, `cfg_min`, and the sigma schedule, users can precisely control how guidance intensity evolves, potentially leading to improved image quality or specific stylistic effects. The original note about increasing steps in `sigmas` for precision still applies: "Increasing steps in `sigmas` input increase precision on CFG-scheduler curve, while keeping sampling steps count unchanged. You can set like 200 steps in your CFG scheduler. Guider will compute current CFG value depending on your denoising schedule."
 
-Increasing steps in `sigmas` input increase precision on CFG-scheduler curve, while keeping sampling steps count unchanged. You can set like 200 steps in your CFG scheduler. Guider will compute current CFG value depending on your denoising schedule.
+### Perpendicular Negative Scheduled CFG Guider (`PerpNegScheduledCFGGuider`)
+![Visual representation of Perpendicular Negative Scheduled CFG](resources/img/perp_neg_scheduled_cfg.png)
 
-## PerpNegSheduledCFGGuider Node
+The `PerpNegScheduledCFGGuider` node is an advanced guidance mechanism that extends the functionality of the `ScheduledCFGGuider`. It integrates dynamic CFG scale adjustment with Perpendicular Negative Guidance. This allows users to not only control the intensity of guidance towards a positive prompt over time but also to simultaneously steer the generation process *away* from concepts defined in a negative prompt.
 
-![Illustration of PerpNegSheduledCFGGuider Node interface](resources/img/perp_neg_scheduled_cfg.png)
+#### Core Purpose
 
-The `PerpNegSheduledCFGGuider` node extends the functionality of `SheduledCFGGuider` by incorporating negative conditioning. This allows for more nuanced control over the generated output by penalizing unwanted features.
+The primary function of this node is to provide fine-grained control over image generation by:
 
-### Parameters
+1.  **Dynamically Adjusting CFG Scale:** Like the `ScheduledCFGGuider`, it interpolates the main Classifier Free Guidance (CFG) scale between a `cfg_max` and `cfg_min` value based on the current position in the sampler's `sigmas` schedule.
+2.  **Applying Perpendicular Negative Guidance:** It incorporates a negative prompt whose influence is controlled by a `neg_scale`. This technique helps to reduce the common issue where a negative prompt might inadvertently suppress related concepts in the positive prompt. Instead of just "subtracting" the negative prompt, perpendicular guidance aims to remove the negative concepts while preserving the positive ones more effectively.
+3.  **Optional Unconditional Baseline Modification:** It offers a flag to use the negative conditioning as the unconditional base for certain internal sampler calculations, which can subtly alter the guidance behavior.
 
-- **model**: The generative model to be used.
-- **positive**: A conditioning input specifying desired attributes or style.
-- **negative**: A conditioning input specifying unwanted features.
-- **unconditional**: An unconditional input serving as the base reference.
-- **cfg_max**: Maximum value for the Classifier-Free Guidance scale (default: 12.0).
-- **cfg_min**: Minimum value for the Classifier-Free Guidance scale (default: 1.0).
-- **neg_scale**: Scaling factor for the negative conditioning (default: 1.0).
-- **sigmas**: List of sigma values defining the CFG-schedule.
-- **use_negative_as_unconditional**: Boolean flag to determine if the negative condition should act as an unconditional baseline on CFG post processing (default: True).
+This combination allows for sophisticated control, enabling users to guide the model towards desired attributes while actively discouraging undesired ones, all with a CFG intensity that can vary across the generation process.
+
+#### Input Parameters
+
+*   **`model`**: This is the diffusion model that will be guided. The `PerpNegScheduledCFGGuider` wraps this model to apply its specialized guidance logic.
+*   **`positive`**: This input accepts the positive conditioning (e.g., text embeddings for desired attributes). As with other guiders, the KSampler (or a similar sampling node) typically provides the actual positive conditioning used during sampling.
+*   **`negative`**: This input accepts the negative conditioning (e.g., text embeddings for concepts to avoid in the image). This is a key component of this node, defining what the generation process should steer away from.
+*   **`unconditional`**: This input accepts the unconditional conditioning (often empty embeddings). The KSampler usually supplies this during sampling. Its role can be modified by the `use_negative_as_unconditional` parameter.
+*   **`cfg_max`**: This float value defines the maximum CFG scale for the positive prompt. This scale is typically applied at higher sigma values (earlier in the sampling). (Default: 12.0)
+*   **`cfg_min`**: This float value defines the minimum CFG scale for the positive prompt. This scale is typically applied at lower sigma values (later in the sampling). (Default: 1.0)
+*   **`neg_scale`**: This float value determines the strength of the perpendicular negative guidance. A higher `neg_scale` will make the model try more aggressively to avoid the concepts present in the `negative` conditioning. (Default: 1.0)
+*   **`sigmas`**: This input takes the schedule of sigma values that the sampler is configured to use. The guider uses this schedule to interpolate the main CFG scale (between `cfg_max` and `cfg_min`) for the current sampling step.
+*   **`use_negative_as_unconditional`**: This is a boolean parameter that alters how the guidance is calculated:
+    *   If **`True`**: The `negative` conditioning is also treated as the unconditional base for certain post-CFG (Classifier Free Guidance) calculations within the sampler or specific callback functions. This can be useful if the negative prompt is intended to define a strong baseline from which the positive prompt should diverge, or if the negative prompt is more descriptive than a truly "empty" unconditional prompt. (Default: True)
+    *   If **`False`**: The standard `unconditional` conditioning input is used as the baseline for these internal calculations. This is the more traditional approach.
+
+By carefully tuning these parameters, users can achieve a high degree of control over the final image, balancing adherence to the positive prompt, avoidance of negative concepts, and the overall intensity of guidance throughout the generation.
+
+### Understanding the Core Logic: `Guider_ScheduledCFG`
+
+While users interact with nodes like `ScheduledCFGGuider` and `PerpNegScheduledCFGGuider`, the actual guidance logic is encapsulated within an internal Python class named `Guider_ScheduledCFG`. Users do not instantiate or call this class directly; the nodes serve as wrappers that configure and utilize this underlying guider. Understanding its existence and mechanism can be helpful for advanced users or developers extending the system.
+
+#### Core Responsibilities
+
+The primary role of the `Guider_ScheduledCFG` class is to perform the guidance calculations during the sampling process. This is chiefly handled within its `predict_noise` method, which is called by the KSampler (or a similar sampler) at each diffusion step.
+
+#### `predict_noise` Method and CFG Calculation
+
+When the sampler calls `predict_noise(sigma, cond, uncond, cond_scale, image_cond_scale=None, **kwargs)`:
+
+1.  **Sigma Observation**: The method receives the current `sigma` value for the sampling step from the sampler.
+2.  **CFG Scale Interpolation**:
+    *   The guider has access to the full `sigmas` schedule (an array of sigma values the sampler will iterate through), as well as `cfg_max` and `cfg_min` values. These are provided when the guider object is initialized by its corresponding wrapper node.
+    *   It determines the relative position of the current `sigma` within the `sigmas` schedule. For instance, if the current `sigma` is the first (highest) value in the schedule, the position is 0. If it's the last (lowest), the position is 1. If it's somewhere in between, the position is a float between 0 and 1.
+    *   Using this relative position, it linearly interpolates the CFG scale for the *current step* between `cfg_max` (at position 0) and `cfg_min` (at position 1).
+    *   The `cond_scale` parameter passed into `predict_noise` is *ignored* by this guider, as it calculates its own scale.
+
+3.  **Applying Scheduled CFG**:
+    *   The model's noise predictions for the conditional (`cond`) and unconditional (`uncond`) inputs are obtained.
+    *   The newly calculated step-specific CFG scale is then used to combine these predictions, typically via the standard CFG formula: `guided_noise = uncond_pred + current_cfg_scale * (cond_pred - uncond_pred)`.
+
+#### Perpendicular Negative Guidance
+
+The `Guider_ScheduledCFG` class is also equipped to handle perpendicular negative guidance if it was initialized with `negative_cond` (negative conditioning) and a `neg_scale` greater than 0. This setup is done by the `PerpNegScheduledCFGGuider` node.
+
+*   If these are present, after the initial scheduled CFG guidance is calculated, the `perp_neg` logic is applied. This involves:
+    *   Calculating a guidance adjustment based on the `negative_cond` and `neg_scale`.
+    *   Modifying the `guided_noise` to steer it away from the concepts in `negative_cond`, attempting to do so orthogonally to the direction of the `positive_cond` to minimize unwanted suppression of positive concepts.
+
+The final noise prediction, adjusted by both scheduled CFG and potentially perpendicular negative guidance, is then returned to the sampler to continue the diffusion process. The `use_negative_as_unconditional` flag (if set by the `PerpNegScheduledCFGGuider` node) also influences which conditioning is treated as the baseline `uncond` during these calculations.
+
+## Other Sigma Schedulers and Utilities
+
+This extension also provides several utility nodes for creating and manipulating sigma schedules.
 
 ## CosineScheduler Node
 
