@@ -194,7 +194,7 @@ class PerpNegSheduledCFGGuider:
                 }),
                 }}
 
-    RETURN_TYPES = ("GUIDER",)
+    RETURN_TYPES = ("MODEL",)
 
     FUNCTION = "get_guider"
     CATEGORY = "sampling/custom_sampling/guiders"
