@@ -36,6 +36,9 @@ class Guider_SheduledCFG: # Removed inheritance from comfy.samplers.CFGGuider
             print("Warning: Sigmas not provided or empty during Guider_SheduledCFG initialization.")
             # self.model_sigma_triggers would have been an empty numpy array here.
 
+    def get_model_object(self, key):
+        return self.inner_model.get_model_object(key)
+
     def set_use_negative(self, use_neg: bool):
         self.use_negative_as_unconditional = use_neg
 
