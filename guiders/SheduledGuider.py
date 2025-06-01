@@ -39,6 +39,9 @@ class Guider_SheduledCFG: # Removed inheritance from comfy.samplers.CFGGuider
     def get_model_object(self, key):
         return self.inner_model.get_model_object(key)
 
+    def load_device(self):
+        self.inner_model.load_device()
+
     def set_use_negative(self, use_neg: bool):
         self.use_negative_as_unconditional = use_neg
 
