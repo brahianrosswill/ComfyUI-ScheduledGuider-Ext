@@ -9,3 +9,4 @@ NODE_CLASS_MAPPINGS = {
 NODE_CLASS_MAPPINGS.update(scheduler_node_mappings)
 NODE_CLASS_MAPPINGS.update(sigmas_node_mappings)
 __all__ = ['NODE_CLASS_MAPPINGS']
+WEB_DIRECTORY = "web"
